@@ -1,4 +1,15 @@
-fnosctl
-probe
+# 编译产物（只忽略仓库根目录下的可执行文件，不要写成 `fnosctl`
+# ——那会连 cmd/fnosctl/ 源码目录一起忽略掉）
+/fnosctl
+/probe
+/fnosctl-*
+
+# 凭据 / 本地配置，绝不入库
 config.json
 *.local.json
+*.key
+tmdb.key
+
+# 本地临时产物
+/reports/
+*.log

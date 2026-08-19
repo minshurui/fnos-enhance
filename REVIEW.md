@@ -263,3 +263,126 @@ ok  fnos-enhance/internal/renamer   (cached)
 - **光鸭云盘 (GuangYa) 不支持**: CloudFS fuse 只读，CD2 gRPC-web API 未逆向
 - **当前支持**: Quark rclone WebDAV 挂载 (mkdir ✓, rename ✓, write ✗)
 - **下一步**: M3.5 Transfer 修复 → M3.6 工程加固 → M4 TG Bot 端到端
+
+---
+
+## M3.5–M3.6: 转存器重写 + 管道接通 — 完成记录
+
+**时间**: 2026-08-19 深夜（用户离线，自主执行）
+**验证方式**: 49 → 57 个测试 `-race` 全绿 + NAS 真实二进制行为验证 + 961 条语料回归
+
+### 一、转存层重写（P0-4 / P0-6 / P1-1 / P1-2 / P1-7 / P2）
+
+**根因修复：位置参数 → Config 结构体**
+
+旧签名 `NewTransferor(quarkCookie, baiduCookie, guangyaClientID, guangyaClientSecret)`
+有四个同类型 `string`，编译器无法发现「传进来的是 ClientID，而 `Transfer()` 只读 AccessToken」
+——这是 P0-6「光鸭转存 100% 失败」的真正根因，不是简单的字段名写错。
+现在改为 `Config{Quark, Baidu, GuangYa, ...}`，每家有独立 `Ready()`，
+且 **构造期** `Validate()` 就拦住空凭据（NAS 实测：`错误: 三家网盘凭据均为空`）。
+
+| 审计项 | 修复内容 | 回归测试 |
+|---|---|---|
+| P0-4 | 三家全部实现分页 + 递归到 `MaxDepth`（旧代码单页 50 条不递归，≈99% 剧集场景取不全） | `TestQuark_PaginationCollectsAllPages`（120 条翻 3 页）、`TestQuark_RecursesIntoSubdirs`、`TestBaidu_PaginationAndRecursion`、`TestGuangYa_PaginationAndRecursion` |
+| P0-6 | AccessToken 优先 → 过期则用 RefreshToken+ClientID 自动刷新（JWT `exp` 提前 60s 判过期） | `TestGuangYa_ClientIDAloneIsNotReady`、`TestGuangYa_AutoRefreshesExpiredToken`、`TestJWTExpired` |
+| P1-1 | 百度走 `cookiejar`，verify 下发的 `BDCLND` 跨请求携带；Jar 未捕获时用 `randsk` 兜底补写 | `TestBaidu_CarriesBDCLNDAfterVerify`（断言 list 请求真的带上了 BDCLND） |
+| P1-2 | 从分享页正则抓真实 `bdstoken`（32 位 hex），不再硬写 `null` | `TestBaidu_ExtractsRealBDSToken`（断言 ≠ "null"） |
+| P1-7 | `doJSON`/`doForm` 统一指数退避 + jitter；`retryable()` 只重试 429/408/5xx | `TestRetry_On429ThenSucceeds`、`TestRetry_ContextCancelStops`、`TestHTTPError_RetryableClassification` |
+| P2 | 删除死代码 `ExtractGuangYaID`/`guangyaLinkRe`（现为 0 引用）；HTTP 方法显式传入，不再用 `data == nil` 隐式决定 GET/POST | `grep` 验证 0 命中 |
+| P2 | `transfer` 包从 **0 测试** → **21 个测试** | — |
+
+### 二、链接识别加固（P1-8 / P1-5）
+
+**P1-8 修复过程中，我自己写的测试抓出了一个更深的漏洞。**
+
+第一版只加了「前导边界 `[^A-Za-z0-9._-]`」，挡住了 `notquark.cn/s/evil`，
+但 `TestDomainBoundary_RejectsLookalikes` 立刻失败并指出：
+
+```
+仿冒域名被误判: "https://evil.com/pan.quark.cn/s/abc" -> Type=quark ID=abc
+```
+
+因为 `/` 被当成合法边界字符，导致**域名出现在别人 URL 的路径里也被当成主机**。
+最终边界规则改为 `(?:^|//|[^A-Za-z0-9._/-])`：排除单个 `/`，只放行 `//`（协议分隔符）。
+三层防御：前导边界 + 子域显式化 `(?:[A-Za-z0-9-]+\.)*` + `/s/` 紧跟域名（挡 `pan.baidu.com.evil.com`）。
+
+P1-5 幂等：`ParseLinks` 按 `(类型, ID)` 去重，并改为按文本出现顺序返回。
+NAS 实测：3 个链接（含 1 个重复）→ 输出 2 条。
+
+### 三、P0-1 管道断裂 — 本轮才真正闭环
+
+排查中发现一个**之前所有记录都漏掉的事实**：`transfer` 和 `land` 是两个
+互不相连的 CLI 子命令，`grep -rn "transfer\." internal/lander/` 结果为 **0**。
+也就是说管道从来没接上，用户必须手工在中间等待并观察挂载。
+
+新增 `internal/pipeline`，把「转存 → **等挂载可见** → 规划 → 落地」串成一条链，
+新增 `fnosctl ingest` 子命令。链路中两个真实卡点被显式处理：
+
+1. **转存提交成功 ≠ 挂载里可见**
+   rclone WebDAV / CloudFS 都有目录缓存。转存完就直接 land 会扫到空目录、
+   静默「成功」什么也没做。现在 `waitForAppear()` 轮询等待，并要求新条目
+   连续两轮数量稳定才动手（避免目录还在陆续出现时就开始改名）。
+   超时错误是**可操作**的，直接给出 `--dir-cache-time` / `vfs/forget` 线索。
+2. **落地范围必须收窄到本次新增**
+   `filterPlansByTopLevel()` 只对本次新出现的顶层条目落地。
+   否则一次 ingest 会把挂载里所有命名不规范的旧数据一起改名。
+   `TestPipeline_OnlyLandsNewEntries` 专门守这条。
+
+前置防护（NAS 实测）：
+- 挂载不可用时**先拦住，不去转存**——否则转存成功却无处落地
+  （`错误: 挂载根不可用: /nope/not/mounted（挂载是否掉了？）`）
+- 光鸭链接给出明确警告：可转存但**无法落地改名**（CloudFS 只读，见 ADR-001）
+
+### 四、当前测试盘
+
+| 包 | 测试数 |
+|---|---|
+| renamer | 14（含 961 条真实语料回归） |
+| transfer | 21 |
+| linker | 9 |
+| pipeline | 8 |
+| lander | 5 |
+| **合计** | **57** |
+
+`go build ./...` / `go vet ./...` / `go test ./... -race` 全绿。
+961 条真实语料：自动入库 961 (100.0%)，需人工确认 0，零碰撞。
+
+---
+
+## 诚实的遗留问题（不要当成已完成）
+
+**这一轮没有做到的事，必须写清楚，否则下一个人会以为管道能用了。**
+
+1. **转存器从未对真实网盘 API 跑过。**
+   21 个测试全是 `httptest` mock —— 它们验证的是我的**分页收敛、递归、
+   Cookie 携带、重试、凭据校验**逻辑，**不能**证明与真实网盘 API 的字段兼容性。
+   夸克/百度/光鸭的接口字段、签名要求、风控策略都可能与我的实现不符。
+   **只有拿真实凭据跑一条真链接才能验证。**
+
+2. **`ingest` 全链路从未真实跑通。**
+   NAS 上只验证了「挂载检查」「光鸭警告」「凭据校验」这些前置分支，
+   因为再往下就需要真实凭据 + 对用户网盘做不可逆写入。
+   端到端 DoD 仍未达成：**一条真实链接 → 飞牛刮出海报**。
+
+3. **光鸭落地依然无解。**
+   961 条语料全部在光鸭上，而 CloudFS 挂载只读（ADR-001 已实测证伪）。
+   CD2 gRPC-web(19798) proto 未逆向。这条腿是断的。
+
+4. **用户的 tg-media-bot 容器里仍是失效的 TMDB Key `cc7790...`**，
+   那边的刮削一直在静默失败。本项目已改为从密钥文件读，但**旧 bot 没修**。
+
+5. **M4 (TG Bot) 仍应冻结**，直到 1 和 2 用真实凭据验证通过。
+
+### 下一步唯一有意义的动作
+
+不是继续写代码，而是拿一条真实链接做一次端到端：
+
+```bash
+export QUARK_COOKIE='...'
+# 先 dry-run 看规划
+/tmp/fnosctl ingest "<真实夸克链接>" --mount /vol02/1000-1-a92fbdbc/影视 --source 0_待整理
+# 确认无误后
+/tmp/fnosctl ingest "<真实夸克链接>" --mount /vol02/1000-1-a92fbdbc/影视 --source 0_待整理 --execute
+```
+
+**网盘改名不可逆**，所以 `--execute` 需用户本人确认后再跑。
