@@ -215,3 +215,51 @@ T  吞噬星空（罗峰）           ← 脏名，需治理
 空片名 0 | 残壳 0 | go test -race 全绿 | go build ./... 通过
 ```
 待确认的 18 条全部是 `合集篇`（剪辑版），按设计不自动入库。
+
+---
+
+## M3.4: 落地器 (Lander) — 完成记录
+
+**完成时间**: 2026-08-20
+**交付物**: `internal/lander/lander.go` + `lander_test.go` + `cmd/fnosctl land` 命令
+
+### 新增能力
+
+| 能力 | 说明 |
+|------|------|
+| `PlanFromDir` | 遍历 rclone 挂载目录 → ParsePackage + NameMap + TMDB + Disambiguate → 生成目标路径 |
+| `Execute` | 碰撞检测 → MkdirAll → os.Rename，默认 dry-run |
+| `land` CLI | `fnosctl land <挂载根> [--source 子目录] [--cat 分类] [--execute]` |
+| 路径分类自动剥离 | 路径第一段是分类(动漫/电影/...)时自动剥除，不重复 |
+| 根目录散文件处理 | 无剧名目录时用扫描根目录名推断 |
+
+### 修复
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| `W-万古至尊` 的 `W-` 前缀未剥离 | `reIndexPrefix` 正则只匹配 `字母+空格` | 改为 `^[A-Za-z][\s\-]+(\p{Han})`，只在后跟汉字时剥 |
+| TMDB 错误被静默吞掉 | `_ = err` | 改为打印 stderr 警告 |
+| 路径分类重复（电影/电影/后室） | 扫描根含分类目录 + BuildPath 又加分类 | 目标路径始终相对于 mountRoot |
+
+### NAS 端到端实测（dry-run）
+
+| 测试 | 结果 |
+|------|------|
+| W-万古至尊 (10集, 动漫) | `W-`剥离 + TMDB(tmdb-329125, 2026) + 路径正确 ✓ |
+| 后室 (电影) | TMDB(tmdb-1083381) + 路径正确 ✓ |
+| 鬼灭之刃 (动漫) | source=target, 幂等跳过 ✓ |
+| 夸克动漫全量 (809文件) | 733规划 / 76跳过 / 0失败 ✓ |
+
+### 测试
+
+```
+ok  fnos-enhance/internal/lander    1.017s  (5 tests, -race)
+ok  fnos-enhance/internal/linker    (cached)
+ok  fnos-enhance/internal/renamer   (cached)
+```
+
+### 架构限制
+
+- **光鸭云盘 (GuangYa) 不支持**: CloudFS fuse 只读，CD2 gRPC-web API 未逆向
+- **当前支持**: Quark rclone WebDAV 挂载 (mkdir ✓, rename ✓, write ✗)
+- **下一步**: M3.5 Transfer 修复 → M3.6 工程加固 → M4 TG Bot 端到端
