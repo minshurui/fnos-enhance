@@ -98,8 +98,9 @@ var (
 	reVolumeStats = regexp.MustCompile(`\([\d.]+\s*[KMGT]B[^)]*\)`)
 	// 年份（含紧贴括号的写法：凡人修仙传(2020)）
 	reYear = regexp.MustCompile(`\(?\b((?:19|20)\d{2})\b\)?`)
-	// 首字母索引前缀："T  吞噬星空" / "X   仙逆"
-	reIndexPrefix = regexp.MustCompile(`^[A-Za-z]\s{1,}`)
+	// 首字母索引前缀："T  吞噬星空" / "X   仙逆" / "W-万古至尊"
+	// 只在后面跟汉字时才剥（避免误杀 X-Men）
+	reIndexPrefix = regexp.MustCompile(`^[A-Za-z][\s\-]+(\p{Han})`)
 	// 全角括号内容（作者/搬运者标注）：（罗峰）（王麻子）
 	reFullWidthParen = regexp.MustCompile(`（[^）]*）`)
 	// 多余空白
@@ -133,7 +134,7 @@ func ParseDirName(dir string) (title, year string, tmdbID int, tmdbType string) 
 	}
 
 	// 4. 去首字母索引前缀
-	s = reIndexPrefix.ReplaceAllString(s, "")
+	s = reIndexPrefix.ReplaceAllString(s, "$1")
 
 	// 5. 去全角括号标注（作者/搬运者）
 	s = reFullWidthParen.ReplaceAllString(s, " ")
