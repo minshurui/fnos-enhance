@@ -250,8 +250,13 @@ func leadingEpisode(file string) (int, bool) {
 // ============================================================
 
 var (
-	reSxxExx  = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,4})`)
-	reEpOnly  = regexp.MustCompile(`(?i)(?:^|[^a-zA-Z0-9])EP?(\d{1,4})(?:[^0-9]|$)`)
+	reSxxExx = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,4})`)
+	reEpOnly = regexp.MustCompile(`(?i)(?:^|[^a-zA-Z0-9])EP?(\d{1,4})(?:[^0-9]|$)`)
+	// 裸集号傅底：文件名以 1-3 位数字开头，如 `01.4k.mp4` / `07.mp4`
+	// （真实夸克分享里大量存在，旧代码完全识别不了，
+	//   导致 10 个文件全映射到同一路径）
+	// 限 3 位：避开 `2026`、`1080` 这类年份/分辨率
+	reBareEp  = regexp.MustCompile(`^(\d{1,3})(?:[.\-_\s]+(.*))?$`)
 	reEpCN    = regexp.MustCompile(`第(\d{1,4})[集话期]`)
 	reSeasonF = regexp.MustCompile(`(?i)S(\d{1,2})(?:[^0-9E]|$)`)
 )
@@ -277,6 +282,9 @@ func ParseFileName(file string) (title string, season, episode int, seasonFound,
 		} else if m := reEpOnly.FindStringSubmatch(name); m != nil {
 			episode, _ = strconv.Atoi(m[1])
 			epFound = true
+		} else if ep, ok := bareEpisode(name); ok {
+			// 最后傅底：裸数字开头（`01.4k` / `07`）
+			episode, epFound = ep, true
 		}
 		// 仅季号
 		if m := reSeasonF.FindStringSubmatch(name); m != nil {
@@ -292,6 +300,42 @@ func ParseFileName(file string) (title string, season, episode int, seasonFound,
 		title = normalizeTitle(name)
 	}
 	return
+}
+
+// bareEpisode 识别以裸数字开头的集号文件名（已去扩展名）。
+//
+// 真实样本：夸克分享 `Z - 罪 - A/01.4k.mp4` … `10.4k.mp4`
+// 旧代码识别不了这类名字，10 个文件全部映射到同一个目标路径。
+//
+// 这个傅底很容易误伤（`007 James Bond.mkv` 不能变成第 7 集），
+// 所以设三道门：
+//  1. 只收 1-3 位数字（排除 `2026` 年份、`1080`/`2160` 分辨率）
+//  2. 数字不得是常见低分辨率值（480/720 等）
+//  3. 数字后的残余部分必须为空或**纯技术标记**（`4k` / `1080p`），
+//     一旦含汉字或英文片名就拒绝——这条挡住了 `007 James Bond`
+func bareEpisode(name string) (int, bool) {
+	m := reBareEp.FindStringSubmatch(strings.TrimSpace(name))
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	// 门 2：常见分辨率数值不可能是集号
+	switch n {
+	case 360, 480, 540, 576, 720:
+		return 0, false
+	}
+	rest := strings.TrimSpace(m[2])
+	if rest == "" {
+		return n, true // `07.mp4`
+	}
+	// 门 3：残余必须从技术标记开头（`4k`、`1080p`、`HDR` …）
+	if firstTechIndex(rest) != 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // ============================================================

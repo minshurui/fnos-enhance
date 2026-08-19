@@ -2,8 +2,12 @@ package renamer
 
 import (
 	"bufio"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -575,5 +579,98 @@ func TestPickBest_RejectsMismatch(t *testing.T) {
 	people := []TMDBResult{{ID: 222, MediaType: "person", Name: "吞噬星空"}}
 	if got := pickBest("吞噬星空", "", people); got != nil {
 		t.Errorf("person 类型应被排除，却返回 id=%d", got.ID)
+	}
+}
+
+// 真实数据抓到的崩溃：夸克分享 "Z - 罪 - A" 触发
+// pickBest 全率否决 → Search 返回 (nil, nil) → Enrich 解引用 nil → panic
+func TestSearch_NeverReturnsNilNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 返回一个年份差极大的结果，pickBest 会全部否决
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[
+			{"id":999,"name":"完全不相关的老片","first_air_date":"1950-01-01","media_type":"tv"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := NewTMDBClient("dummy")
+	c.BaseURL = srv.URL
+
+	r, err := c.Search(context.Background(), "罪", "2024")
+	if err == nil && r == nil {
+		t.Fatal("Search 返回了 (nil, nil)：调用方必然 panic（这是真实崩溃的根因）")
+	}
+	if err != nil && r != nil {
+		t.Error("同时返回结果和错误，语义不明")
+	}
+}
+
+// Enrich 拿到无匹配时必须返回 error 而不是崩溃
+func TestEnrich_NoMatchReturnsErrorNotPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[
+			{"id":999,"name":"无关","first_air_date":"1950-01-01","media_type":"tv"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := NewTMDBClient("dummy")
+	c.BaseURL = srv.URL
+
+	info := &MediaInfo{Title: "罪", Year: "2024", Category: CatAnime}
+	err := c.Enrich(context.Background(), info) // 不得 panic
+	if err == nil {
+		t.Error("无匹配时应返回错误")
+	}
+	if info.TMDBID != 0 {
+		t.Errorf("失败时不应写入 TMDBID，得到 %d", info.TMDBID)
+	}
+}
+
+// 真实数据暴露：17 个文件同片名查不到时发了 17 次重复请求（只缓存成功结果）
+// 961 文件批量跑会直接撞 TMDB 限流
+func TestSearch_CachesNegativeResults(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer srv.Close()
+
+	c := NewTMDBClient("dummy")
+	c.BaseURL = srv.URL
+
+	for i := 0; i < 10; i++ {
+		if _, err := c.Search(context.Background(), "查不到的片名", "2026"); err == nil {
+			t.Fatal("应返回错误")
+		}
+	}
+	got := atomic.LoadInt32(&hits)
+	// 中文一次 + 英文 fallback 一次 = 2；不该是 20
+	if got > 2 {
+		t.Errorf("失败结果未缓存：10 次查询发了 %d 个请求（应 ≤2），批量跑必撞限流", got)
+	}
+}
+
+// 封死「nil 进缓存 → 缓存命中直接 return (nil,nil) → 调用方 panic」这条路
+func TestSearch_CacheNeverYieldsNilNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[{"id":1,"name":"无关","first_air_date":"1950-01-01","media_type":"tv"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewTMDBClient("dummy")
+	c.BaseURL = srv.URL
+
+	// 人为把 nil 塞进缓存，模拟未来改动引入的回归
+	c.cache["毒药|2026"] = nil
+
+	r, err := c.Search(context.Background(), "毒药", "2026")
+	if err == nil && r == nil {
+		t.Fatal("缓存里的 nil 被原样返回 → 调用方必 panic")
 	}
 }

@@ -26,8 +26,14 @@ import (
 
 func TestConfigValidate_RejectsEmpty(t *testing.T) {
 	var c Config
-	if err := c.Validate(); err == nil {
-		t.Fatal("三家凭据全空时必须报错，否则运行期才发现（旧 bug）")
+	// Validate 只填默认值，不再硬拦空凭据：
+	// 实测夸克列举接口无 cookie 也能读公开分享，dry-run 预览应免凭据
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate 不应因空凭据报错: %v", err)
+	}
+	// 但真转存（写入）前必须报错
+	if err := c.RequireCredentials(); err == nil {
+		t.Fatal("三家凭据全空时，真转存必须报错")
 	}
 }
 
@@ -62,8 +68,47 @@ func TestGuangYa_ClientIDAloneIsNotReady(t *testing.T) {
 		t.Error("只有 ClientID 不应算就绪——这正是旧代码 100% 失败的根因")
 	}
 	cfg := Config{GuangYa: c}
-	if err := cfg.Validate(); err == nil {
-		t.Error("应在构造期报错")
+	if err := cfg.RequireCredentials(); err == nil {
+		t.Error("只有 ClientID 时，真转存应报错")
+	}
+}
+
+// 实测发现：夸克 token/detail 无 cookie 也能读公开分享
+// → dry-run 预览不得因缺 cookie 而失败，但 --execute 必须拦住
+func TestQuark_DryRunWorksWithoutCookie(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/token"):
+			writeJSON(w, map[string]interface{}{"status": 200, "data": map[string]string{"stoken": "ST"}})
+		case strings.Contains(r.URL.Path, "/detail"):
+			writeJSON(w, map[string]interface{}{
+				"status": 200,
+				"data": map[string]interface{}{"list": []map[string]interface{}{
+					{"fid": "F1", "file_name": "01.4k.mp4", "file_type": 1},
+				}},
+				"metadata": map[string]interface{}{"_total": 1},
+			})
+		case strings.Contains(r.URL.Path, "/save"):
+			t.Error("dry-run 不应调 save")
+		}
+	}))
+	defer srv.Close()
+
+	q := newTestQuark(srv.URL)
+	q.cfg.Cookie = "" // 无凭据
+
+	res, err := q.Transfer(context.Background(), linker.ShareLink{ID: "abc"}, true)
+	if err != nil {
+		t.Fatalf("无 cookie 的 dry-run 列举应成功（真实 API 已验证）: %v", err)
+	}
+	if len(res.Names) != 1 {
+		t.Errorf("列举结果不对: %+v", res.Names)
+	}
+
+	// 但 execute 必须报错
+	_, err = q.Transfer(context.Background(), linker.ShareLink{ID: "abc"}, false)
+	if err == nil || !strings.Contains(err.Error(), "QUARK_COOKIE") {
+		t.Errorf("无 cookie 的真转存必须报错并指向 QUARK_COOKIE，得到: %v", err)
 	}
 }
 

@@ -75,15 +75,30 @@ type TMDBClient struct {
 	apiKey string
 	http   *http.Client
 
+	// BaseURL 仅供测试注入，空则用真实 TMDB 域名
+	BaseURL string
+
 	mu    sync.RWMutex
 	cache map[string]*TMDBResult
+	// negative 负结果缓存：key -> 失败原因。
+	// 真实数据暴露：一个 17 文件的分享，片名查不到时会发 17 次
+	// 重复请求（成功才缓存）。961 文件批量跑会直接撞 TMDB 限流。
+	negative map[string]string
+}
+
+func (c *TMDBClient) base() string {
+	if c.BaseURL != "" {
+		return c.BaseURL
+	}
+	return "https://api.themoviedb.org"
 }
 
 func NewTMDBClient(apiKey string) *TMDBClient {
 	return &TMDBClient{
-		apiKey: apiKey,
-		http:   &http.Client{Timeout: 10 * time.Second},
-		cache:  make(map[string]*TMDBResult),
+		apiKey:   apiKey,
+		http:     &http.Client{Timeout: 10 * time.Second},
+		cache:    make(map[string]*TMDBResult),
+		negative: make(map[string]string),
 	}
 }
 
@@ -92,9 +107,15 @@ func NewTMDBClient(apiKey string) *TMDBClient {
 func (c *TMDBClient) Search(ctx context.Context, name, year string) (*TMDBResult, error) {
 	key := name + "|" + year
 	c.mu.RLock()
-	if r, ok := c.cache[key]; ok {
+	if r, ok := c.cache[key]; ok && r != nil {
+		// 必须查 r != nil：若 nil 进了缓存，这里会返回 (nil, nil)，
+		// 绕过下文所有 nil 检查，让调用方 Enrich 直接 panic
 		c.mu.RUnlock()
 		return r, nil
+	}
+	if reason, ok := c.negative[key]; ok {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("%s", reason)
 	}
 	c.mu.RUnlock()
 
@@ -102,7 +123,7 @@ func (c *TMDBClient) Search(ctx context.Context, name, year string) (*TMDBResult
 		return nil, fmt.Errorf("TMDB API Key 未配置")
 	}
 
-	u := fmt.Sprintf("https://api.themoviedb.org/3/search/multi?api_key=%s&query=%s&language=zh-CN",
+	u := fmt.Sprintf(c.base()+"/3/search/multi?api_key=%s&query=%s&language=zh-CN",
 		c.apiKey, url.QueryEscape(name))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -134,25 +155,47 @@ func (c *TMDBClient) Search(ctx context.Context, name, year string) (*TMDBResult
 	}
 	if len(sr.Results) == 0 {
 		// 中文无结果时 fallback 英文搜索（真实案例："Nezha Conquers the Dragon King" 搜中文库零结果）
-		if r, err := c.searchLang(ctx, name, year, "en-US"); err == nil {
+		if r, err := c.searchLang(ctx, name, year, "en-US"); err == nil && r != nil {
+			c.remember(key, r)
 			return r, nil
 		}
-		return nil, fmt.Errorf("TMDB 无结果: %s", name)
+		return nil, c.rememberFail(key, fmt.Sprintf("TMDB 无结果: %s", name))
 	}
 
 	best := pickBest(name, year, sr.Results)
 	if best == nil {
 		// 中文候选均不匹配时 fallback 英文搜索
-		if r, err := c.searchLang(ctx, name, year, "en-US"); err == nil {
+		if r, err := c.searchLang(ctx, name, year, "en-US"); err == nil && r != nil {
+			c.remember(key, r)
 			return r, nil
 		}
-		return nil, fmt.Errorf("TMDB 候选均与「%s (%s)」不匹配，拒绝套用（避免认错片）", name, year)
+		return nil, c.rememberFail(key,
+			fmt.Sprintf("TMDB 候选均与「%s (%s)」不匹配，拒绝套用（避免认错片）", name, year))
 	}
 
-	c.mu.Lock()
-	c.cache[key] = best
-	c.mu.Unlock()
+	c.remember(key, best)
 	return best, nil
+}
+
+// remember 缓存成功结果（nil 绝不入缓存）
+func (c *TMDBClient) remember(key string, r *TMDBResult) {
+	if r == nil {
+		return
+	}
+	c.mu.Lock()
+	c.cache[key] = r
+	c.mu.Unlock()
+}
+
+// rememberFail 缓存失败原因并返回对应 error，避免同一片名反复请求
+func (c *TMDBClient) rememberFail(key, reason string) error {
+	c.mu.Lock()
+	if c.negative == nil {
+		c.negative = make(map[string]string)
+	}
+	c.negative[key] = reason
+	c.mu.Unlock()
+	return fmt.Errorf("%s", reason)
 }
 
 // pickBest 候选打分：年份为最强判据，其次片名相似度，最后才是 TMDB 自身排序。
@@ -235,7 +278,7 @@ func absDiff(a, b string) int {
 
 // searchLang 用指定语言搜索 TMDB（供 Search 的英文 fallback 调用）
 func (c *TMDBClient) searchLang(ctx context.Context, name, year, lang string) (*TMDBResult, error) {
-	u := fmt.Sprintf("https://api.themoviedb.org/3/search/multi?api_key=%s&query=%s&language=%s",
+	u := fmt.Sprintf(c.base()+"/3/search/multi?api_key=%s&query=%s&language=%s",
 		c.apiKey, url.QueryEscape(name), lang)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -258,7 +301,14 @@ func (c *TMDBClient) searchLang(ctx context.Context, name, year, lang string) (*
 	if len(sr.Results) == 0 {
 		return nil, fmt.Errorf("TMDB 无结果: %s", name)
 	}
-	return pickBest(name, year, sr.Results), nil
+	best := pickBest(name, year, sr.Results)
+	if best == nil {
+		// pickBest 可能全率否决（年份差≥ 4 等）。必须当错误报，
+		// 不能返回 (nil, nil)——调用方 Enrich 会直接解引用导致 panic。
+		// （真实分享 "Z - 罪 - A" 触发过这个崩溃）
+		return nil, fmt.Errorf("TMDB 有 %d 个候选但均与年份/片名不符，拒绝误匹配: %s (%s)", len(sr.Results), name, year)
+	}
+	return best, nil
 }
 
 // Enrich 用 TMDB 补全字段：仅在缺失时填充，已有 {tmdb-ID} 则跳过查询
@@ -273,6 +323,10 @@ func (c *TMDBClient) Enrich(ctx context.Context, info *MediaInfo) error {
 	r, err := c.Search(ctx, info.Title, info.Year)
 	if err != nil {
 		return err
+	}
+	if r == nil {
+		// 双重保险：Search 已保证不返回 (nil, nil)，但不依赖这个保证
+		return fmt.Errorf("TMDB 未找到匹配项: %s", info.Title)
 	}
 	info.TMDBID = r.ID
 	info.TMDBType = r.MediaType

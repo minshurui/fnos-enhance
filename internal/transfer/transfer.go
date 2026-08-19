@@ -88,8 +88,17 @@ func (c *Config) Validate() error {
 	if c.MaxDepth == 0 {
 		c.MaxDepth = 3
 	}
+	return nil
+}
+
+// RequireCredentials 写入型操作（真转存）前的凭据检查。
+//
+// 为何不放在 Validate 里：实测夸克 `share/sharepage/token` 与 `detail`
+// 两个接口**无 cookie 也能访问公开分享**（已对真实链接验证），
+// 所以 dry-run 预览不应强制要求凭据。只有 `save` 才必须登录。
+func (c *Config) RequireCredentials() error {
 	if !c.Quark.Ready() && !c.Baidu.Ready() && !c.GuangYa.Ready() {
-		return fmt.Errorf("三家网盘凭据均为空，至少需配置一家（QUARK_COOKIE / BAIDU_COOKIE / GUANGYA_ACCESS_TOKEN）")
+		return fmt.Errorf("三家网盘凭据均为空，真正转存至少需配置一家（QUARK_COOKIE / BAIDU_COOKIE / GUANGYA_ACCESS_TOKEN）")
 	}
 	return nil
 }
@@ -148,9 +157,9 @@ func New(cfg Config) (Transferor, error) {
 		return nil, err
 	}
 	m := &multiTransferor{cfg: cfg}
-	if cfg.Quark.Ready() {
-		m.quark = &QuarkTransferor{cfg: cfg.Quark, common: cfg, HTTP: newHTTPClient(cfg.Timeout, false)}
-	}
+	// 夸克总是构造：实测 token/detail 接口无 cookie 也能读公开分享，
+	// dry-run 预览不应因缺 cookie 而报错；save 时再校验。
+	m.quark = &QuarkTransferor{cfg: cfg.Quark, common: cfg, HTTP: newHTTPClient(cfg.Timeout, false)}
 	if cfg.Baidu.Ready() {
 		// 百度必须带 CookieJar：verify 后的 BDCLND 要跨请求携带（审计 P1-1）
 		m.baidu = &BaiduTransferor{cfg: cfg.Baidu, common: cfg, HTTP: newHTTPClient(cfg.Timeout, true)}

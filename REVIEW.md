@@ -386,3 +386,107 @@ export QUARK_COOKIE='...'
 ```
 
 **网盘改名不可逆**，所以 `--execute` 需用户本人确认后再跑。
+
+---
+
+## 真实链接验证 — 首次打通真实网盘 API（2026-08-20）
+
+**输入**: 用户提供的真实夸克分享 `https://pan.quark.cn/s/d4dc6878059c#/list/share`
+
+这是 REVIEW.md 上一节标记为「未做到」的那个缺口。用真实链接一跑，
+**立刻抓出 3 个 mock 测试全部漏掉的问题**，其中 1 个是崩溃。
+
+### 一、转存层：字段名全部正确（首次真实验证）
+
+意外发现：夸克 `share/sharepage/token` 与 `detail` **无 cookie 也能读公开分享**。
+因此原先「构造期硬拦空凭据」是过度限制 —— dry-run 预览不该要凭据。
+改为 `Validate()` 只填默认值，新增 `RequireCredentials()` 只在 `--execute` 前校验。
+
+实测我的二进制对真实 API：
+```
+✓ 夸克 | 顶层 1 项 | 递归共 20 个文件
+```
+`data.list[].fid / file_name / dir / file_type / share_fid_token`、
+`metadata._total` 与实现完全一致；分页、递归（MaxDepth 3）均正确。
+
+真实分享结构：
+```
+Z - 罪 - A/                                       ← 顶层
+  01.4k.mp4 … 10.4k.mp4                          ← 版本1，裸集号
+  4K/ S01E07~E10.mp4
+      2026.2160p.HDR.60fps.DDP5.1.S01E01~E06.mkv ← 版本2
+```
+
+### 二、崩溃 #1：`pickBest` 全率否决 → `Search` 返回 `(nil, nil)` → panic
+
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+  renamer.(*TMDBClient).Enrich  tmdb.go:277
+```
+
+`pickBest()` 在所有候选都被年份校验否决时返回 `nil`，`Search` 却
+把 `(nil, nil)` 交给调用方，`Enrich` 直接 `r.ID` → 崩。
+
+**这是契约违反，不是边界情况**：57 个测试全用 mock 喂了能匹配的结果，
+从没喂过"有候选但全被否决"。修复：`Search`/`searchLang` 保证
+永不返回 `(nil, nil)`；`Enrich` 加双重 nil 兜底。
+回归测试 `TestSearch_NeverReturnsNilNil`、`TestEnrich_NoMatchReturnsErrorNotPanic`。
+
+### 三、崩溃 #2（潜伏）：nil 进缓存会绕过所有 nil 检查
+
+```go
+if r, ok := c.cache[key]; ok { return r, nil }   // r 若为 nil → (nil, nil)
+```
+缓存命中路径在所有 nil 检查**之前**，一旦 nil 入缓存就重新打开 panic 通道。
+修复：命中条件加 `&& r != nil`，写入统一走 `remember()`（nil 绝不入缓存）。
+回归测试 `TestSearch_CacheNeverYieldsNilNil`（人为塞 nil 进缓存）。
+
+### 四、裸集号无法识别 → 10 个文件映射到同一路径
+
+`01.4k.mp4` … `10.4k.mp4` 全部被判为「电影，无集号」，
+10 个文件目标路径完全相同。**碰撞检测拦住了**（标为待确认，未静默覆盖），
+安全网有效，但功能缺口是真的：17 个文件只有 8 个能自动入库。
+
+新增 `bareEpisode()` 兜底，三道防误伤门：
+1. 只收 1–3 位数字（排除 `2026` 年份、`1080`/`2160` 分辨率）
+2. 排除常见低分辨率值 360/480/540/576/720
+3. **数字后的残余必须为空或纯技术标记** —— 这条挡住 `007 James Bond.mkv`
+   （残余 ` James Bond` 不是技术标记 → 拒绝，不会误判成第 7 集）
+
+结果：可入库 8 → **13**。剩 4 个待确认是真实歧义
+（root `07.4k.mp4` 与 `4K/S01E07.mp4` 同集同扩展名、无区分标记），
+交人工判断是正确行为。
+
+**961 条黄金语料仍 100%、零碰撞** —— 这个兜底最容易误伤，回归是硬门槛。
+
+### 五、TMDB 失败结果未缓存 → 同片名发 17 次重复请求
+
+只有成功结果进缓存，失败每次都重新请求。961 文件批量跑会直接撞限流。
+修复：新增 `negative` 负缓存（key → 失败原因）；CLI 侧同一片名只警告一次。
+实测：警告 17 行 → 1 行，HTTP 请求 17 次 → 2 次（中文 + 英文 fallback）。
+回归测试 `TestSearch_CachesNegativeResults`（10 次查询断言 ≤2 个请求）。
+
+### 六、TMDB 查不到《罪》(2026) 是正确行为，不是 bug
+
+分享名 `Z - 罪 - A` 是刻意混淆的（盗版规避关键词），TMDB 无此条目。
+`pickBest` 拒绝套用「犯罪心理」「罪恶黑名单」等无关结果 —— 这正是设计意图。
+片名残留的 ` - A` 后缀**没有修**：只有一个样本，无法判断
+「`X - 片名 - Y` 是通用约定」还是「这家上传者的习惯」。
+按「不猜」原则留给 NeedsReview 标记，不凭单一样本发明规则。
+
+### 测试盘：57 → 62
+
+| 包 | 测试数 |
+|---|---|
+| renamer | 19（+5：nil 契约 ×3、负缓存 ×1、裸集号回归） |
+| transfer | 22（+1：无 cookie dry-run） |
+| linker | 9 |
+| pipeline | 8 |
+| lander | 5 |
+
+### 仍未做到
+
+- **转存的 `save` 步骤仍未验证**：需要真实 QUARK_COOKIE，用户凭据库里没有
+  （只有 `baidu-pan` 和 `guangya-dev`）。列举链路已真实验证，写入链路没有。
+- **`ingest` 全链路仍未真实跑通**：缺 cookie，且需对用户网盘做不可逆写入。
+- 端到端 DoD（真实链接 → 飞牛刮出海报）**仍未达成**。M4 保持冻结。

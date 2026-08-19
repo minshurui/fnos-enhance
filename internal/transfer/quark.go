@@ -85,8 +85,11 @@ func (q *QuarkTransferor) Transfer(ctx context.Context, link linker.ShareLink, d
 	if link.ID == "" {
 		return nil, fmt.Errorf("无法解析夸克链接: %s", link.Link)
 	}
-	if q.cfg.Cookie == "" {
-		return nil, fmt.Errorf("夸克 cookie 未配置")
+	// 注意：不在这里查 cookie。实测 `share/sharepage/token` 与 `detail`
+	// 无 cookie 也能读公开分享，所以 dry-run 预览应当免凭据。
+	// cookie 只在真正 save 前校验（见下方）。
+	if !dryRun && q.cfg.Cookie == "" {
+		return nil, fmt.Errorf("夸克 cookie 未配置：列举无需凭据，但转存必须登录（设置 QUARK_COOKIE）")
 	}
 	pwdID := link.ID
 

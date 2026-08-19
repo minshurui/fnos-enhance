@@ -311,6 +311,11 @@ func cmdTransfer(args []string) error {
 	}
 
 	cfg := transferConfigFromEnv()
+	if execute {
+		if err := cfg.RequireCredentials(); err != nil {
+			return err
+		}
+	}
 	tr, err := transfer.New(cfg)
 	if err != nil {
 		return err
@@ -419,7 +424,13 @@ func cmdIngest(args []string) error {
 		}
 	}
 
-	tr, err := transfer.New(transferConfigFromEnv())
+	tcfg := transferConfigFromEnv()
+	if execute {
+		if err := tcfg.RequireCredentials(); err != nil {
+			return err
+		}
+	}
+	tr, err := transfer.New(tcfg)
 	if err != nil {
 		return err
 	}
@@ -558,6 +569,8 @@ func applyNameMap(info *renamer.MediaInfo) {
 	nameMap.Apply(info)
 }
 
+var warnedTMDB = map[string]bool{}
+
 func enrichTMDB(info *renamer.MediaInfo) {
 	c := getTMDB()
 	if c == nil {
@@ -566,7 +579,12 @@ func enrichTMDB(info *renamer.MediaInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := c.Enrich(ctx, info); err != nil {
-		fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
+		// 同一片名只警告一次：一个 17 文件的分享会刷 17 行相同警告，
+		// 961 文件批量跑时真正的问题会被洗掉
+		if !warnedTMDB[info.Title] {
+			warnedTMDB[info.Title] = true
+			fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
+		}
 	}
 }
 
