@@ -1,0 +1,4 @@
+fnosctl
+probe
+config.json
+*.local.json
