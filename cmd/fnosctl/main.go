@@ -517,7 +517,7 @@ func cmdIngest(args []string) error {
 		}
 		q.ToPdirPath = os.Getenv("QUARK_TO_PDIR_PATH")
 		if q.ToPdirPath == "" {
-			q.ToPdirPath = "影视" // 落点决策：固定进影视目录根（可 QUARK_TO_PDIR_PATH 覆盖）
+			q.ToPdirPath = "/影视" // 落点决策：固定进影视目录根（CLI 路径格式带前导 /，可 QUARK_TO_PDIR_PATH 覆盖）
 		}
 		tr = q
 		fmt.Println("转存通道: 夸克官方 OAuth（免 cookie）| 落点: " + q.ToPdirPath)
