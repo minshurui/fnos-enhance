@@ -235,6 +235,10 @@ func pickBest(query, year string, results []TMDBResult) *TMDBResult {
 		}
 
 		// ② 片名相似度
+		// 短片名的子串匹配极不可靠：真实事故——查「罪」命中「余罪(2016)」，
+		// 因为 Contains("余罪","罪") 为真。单字片名能命中几百部片，
+		// 没年份可否决时就会直接认错。
+		qRunes := len([]rune(q))
 		matched := false
 		for _, n := range []string{r.Title, r.Name, r.OriginalTitle, r.OriginalName} {
 			if n == "" {
@@ -245,13 +249,27 @@ func pickBest(query, year string, results []TMDBResult) *TMDBResult {
 			case nk == q:
 				score += 500
 				matched = true
-			case strings.Contains(nk, q) || strings.Contains(q, nk):
+			case (strings.Contains(nk, q) || strings.Contains(q, nk)) && qRunes >= 3:
 				score += 100
+				matched = true
+			case strings.Contains(nk, q) || strings.Contains(q, nk):
+				// 短片名（≤ 2 字）仅子串命中：不加分。
+				// 只有年份强匹配才能把它拉过阈值。
 				matched = true
 			}
 		}
 		if !matched {
 			continue // 片名毫不相干 → 剔除
+		}
+		// 短片名（≤ 2 字）且无年份佐证 → 信息量不足，一律剔除。
+		//
+		// 真实教训：「罪」(2026 剧) 不在 TMDB 里。只靠片名搜，
+		// 中文库命中「余罪(2016)」（子串），英文库命中「Crime(2018)」
+		//（原名正好是「罪」，精确相等）——两个都是错的。
+		// 单/双字片名在 TMDB 里同名同字太多，没年份时无法区分，
+		// 宁可标待确认，也不能给一个自信的错答案（云端改名不可回滚）。
+		if qRunes <= 2 && year == "" {
+			continue
 		}
 
 		// ③ TMDB 自身排序（最弱，仅同分决胜）

@@ -50,6 +50,9 @@ type Config struct {
 	NameMap *renamer.NameMap
 	// TMDBClient TMDB 客户端（可为 nil）
 	TMDBClient *renamer.TMDBClient
+
+	// AllowNoTMDB 为 true 时，TMDB 识别失败仍然落地（默认 false = 跳过）
+	AllowNoTMDB bool
 }
 
 // Lander 落地器
@@ -143,9 +146,15 @@ func (l *Lander) PlanFromDir(ctx context.Context, mountRoot, categoryHint string
 		}
 
 		// TMDB 补全
+		// 用户决策：认不出就跳过，留给人工。不能无 TMDB 也照落地——
+		// 否则飞牛刮不出海报，而云端改名不可回滚，还得人工改回来。
 		if l.cfg.TMDBClient != nil {
 			if err := l.cfg.TMDBClient.Enrich(ctx, info); err != nil {
 				fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
+			}
+			if info.TMDBID == 0 && !l.cfg.AllowNoTMDB {
+				info.NeedsReview = true
+				info.ReviewReason = "TMDB 未识别，已跳过（确认后可用 NAME_MAP 映射或 --allow-no-tmdb 强制入库）"
 			}
 		}
 

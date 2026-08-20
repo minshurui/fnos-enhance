@@ -133,9 +133,22 @@ func cmdRename(args []string) error {
 
 func cmdPlan(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("用法: fnosctl plan <清单文件>  （每行一条 分类/剧名/[中间层]/文件名）")
+		return fmt.Errorf("用法: fnosctl plan <清单文件> [--allow-no-tmdb]  （每行一条 分类/剧名/[中间层]/文件名）")
 	}
-	data, err := os.ReadFile(args[0])
+	var listFile string
+	for _, a := range args {
+		if a == "--allow-no-tmdb" {
+			allowNoTMDB = true
+			continue
+		}
+		if listFile == "" {
+			listFile = a
+		}
+	}
+	if listFile == "" {
+		return fmt.Errorf("缺少清单文件路径")
+	}
+	data, err := os.ReadFile(listFile)
 	if err != nil {
 		return err
 	}
@@ -223,6 +236,8 @@ func cmdLand(args []string) error {
 		switch {
 		case a == "--execute":
 			execute = true
+		case a == "--allow-no-tmdb":
+			allowNoTMDB = true
 		case strings.HasPrefix(a, "--source="):
 			sourceDir = strings.TrimPrefix(a, "--source=")
 		case strings.HasPrefix(a, "--cat="):
@@ -235,11 +250,12 @@ func cmdLand(args []string) error {
 	}
 
 	cfg := lander.Config{
-		MountPaths: lander.DefaultMountPaths(),
-		SourceDir:  sourceDir,
-		DryRun:     !execute,
-		NameMap:    getNameMap(),
-		TMDBClient: getTMDB(),
+		MountPaths:  lander.DefaultMountPaths(),
+		SourceDir:   sourceDir,
+		DryRun:      !execute,
+		NameMap:     getNameMap(),
+		TMDBClient:  getTMDB(),
+		AllowNoTMDB: allowNoTMDB,
 	}
 	l := lander.New(cfg)
 
@@ -299,6 +315,10 @@ func cmdTransfer(args []string) error {
 	for _, a := range args {
 		if a == "--execute" {
 			execute = true
+			continue
+		}
+		if a == "--allow-no-tmdb" {
+			allowNoTMDB = true
 			continue
 		}
 		textParts = append(textParts, a)
@@ -384,6 +404,8 @@ func cmdIngest(args []string) error {
 		switch args[i] {
 		case "--execute":
 			execute = true
+		case "--allow-no-tmdb":
+			allowNoTMDB = true
 		case "--mount", "--source", "--wait":
 			if i+1 >= len(args) {
 				return fmt.Errorf("%s 缺少参数\n\n%s", args[i], help)
@@ -436,11 +458,12 @@ func cmdIngest(args []string) error {
 	}
 
 	l := lander.New(lander.Config{
-		MountRoot:  mount,
-		SourceDir:  source,
-		DryRun:     !execute,
-		NameMap:    getNameMap(),
-		TMDBClient: getTMDB(),
+		MountRoot:   mount,
+		SourceDir:   source,
+		DryRun:      !execute,
+		NameMap:     getNameMap(),
+		TMDBClient:  getTMDB(),
+		AllowNoTMDB: allowNoTMDB,
 	})
 
 	p := &pipeline.Pipeline{
@@ -571,6 +594,9 @@ func applyNameMap(info *renamer.MediaInfo) {
 
 var warnedTMDB = map[string]bool{}
 
+// allowNoTMDB 由 --allow-no-tmdb 置位：允许 TMDB 未识别的条目照样落地
+var allowNoTMDB bool
+
 func enrichTMDB(info *renamer.MediaInfo) {
 	c := getTMDB()
 	if c == nil {
@@ -585,6 +611,12 @@ func enrichTMDB(info *renamer.MediaInfo) {
 			warnedTMDB[info.Title] = true
 			fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
 		}
+	}
+	// 用户决策：认不出就跳过，不硬着头皮落地。
+	// 无 TMDB 标签飞牛刮不出海报，而云端改名不可逆，人工还得改回来。
+	if info.TMDBID == 0 && !allowNoTMDB {
+		info.NeedsReview = true
+		info.ReviewReason = "TMDB 未识别，已跳过（确认后可用 NAME_MAP 映射或 --allow-no-tmdb 强制入库）"
 	}
 }
 

@@ -674,3 +674,37 @@ func TestSearch_CacheNeverYieldsNilNil(t *testing.T) {
 		t.Fatal("缓存里的 nil 被原样返回 → 调用方必 panic")
 	}
 }
+
+// 用户明确要求：TMDB 认不出就跳过，不能硬着头皮落地
+// （无 tmdb 标签飞牛刮不出海报，而云端改名不可逆）
+func TestShortTitle_NoYear_RefusesMatch(t *testing.T) {
+	// 真实事故：片名「罪」命中「余罪(2016)」(子串) 和「Crime(2018)」(原名精确相等)
+	// 两个都是错的 —— 罪(2026) 根本不在 TMDB 里
+	results := []TMDBResult{
+		{ID: 66832, Name: "余罪", FirstAirDate: "2016-05-23", MediaType: "tv"},
+		{ID: 1165488, Title: "Crime", OriginalTitle: "罪", ReleaseDate: "2018-01-01", MediaType: "movie"},
+	}
+	if got := pickBest("罪", "", results); got != nil {
+		t.Errorf("单字片名+无年份必须拒绝匹配，却选中了 id=%d（会把 10 集剧改成电影目录）", got.ID)
+	}
+}
+
+// 但有年份佐证时，短片名应当能正常匹配，不可因为加了门槛就全废
+func TestShortTitle_WithYear_StillMatches(t *testing.T) {
+	results := []TMDBResult{
+		{ID: 111, Name: "活着", FirstAirDate: "1994-01-01", MediaType: "movie"},
+	}
+	if got := pickBest("活着", "1994", results); got == nil {
+		t.Error("短片名但年份精确吻合，应当匹配成功")
+	}
+}
+
+// 长片名的子串匹配不受影响
+func TestLongTitle_SubstringStillWorks(t *testing.T) {
+	results := []TMDBResult{
+		{ID: 222, Name: "吞噬星空 第二季", FirstAirDate: "2023-01-01", MediaType: "tv"},
+	}
+	if got := pickBest("吞噬星空", "", results); got == nil {
+		t.Error("≥3 字片名的子串匹配应保留")
+	}
+}

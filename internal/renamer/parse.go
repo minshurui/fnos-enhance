@@ -101,6 +101,10 @@ var (
 	// 首字母索引前缀："T  吞噬星空" / "X   仙逆" / "W-万古至尊"
 	// 只在后面跟汉字时才剥（避免误杀 X-Men）
 	reIndexPrefix = regexp.MustCompile(`^[A-Za-z][\s\-]+(\p{Han})`)
+	// 尾部单字母标记：上传者的分组/排序标记。
+	// 真实样本：`Z - 罪 - A` —— 首尾都是标记，片名只有「罪」。
+	// 要求前面紧跟汉字，避免误杀英文片名里有意义的尾字母
+	reTrailIndex = regexp.MustCompile(`(\p{Han})[\s]*[\-－—][\s]*[A-Za-z]\s*$`)
 	// 全角括号内容（作者/搬运者标注）：（罗峰）（王麻子）
 	reFullWidthParen = regexp.MustCompile(`（[^）]*）`)
 	// 多余空白
@@ -135,6 +139,10 @@ func ParseDirName(dir string) (title, year string, tmdbID int, tmdbType string) 
 
 	// 4. 去首字母索引前缀
 	s = reIndexPrefix.ReplaceAllString(s, "$1")
+
+	// 4b. 去尾部单字母标记（`Z - 罪 - A` → `罪`）
+	// 与上一步对称：上传者常在首尾各放一个字母做分组排序
+	s = reTrailIndex.ReplaceAllString(s, "$1")
 
 	// 5. 去全角括号标注（作者/搬运者）
 	s = reFullWidthParen.ReplaceAllString(s, " ")
