@@ -132,6 +132,8 @@ type TransferResult struct {
 	Transferred int
 	// DryRun 为 true 时只列举不转存
 	DryRun bool
+	// Note 附加说明（如官方 OAuth 通道的落点路径），可为空
+	Note string
 }
 
 // FileCount 递归条目里的文件数（不含目录）

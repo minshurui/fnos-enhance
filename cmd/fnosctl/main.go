@@ -21,6 +21,9 @@ const usage = `fnosctl — 飞牛增强层 CLI
   fnosctl parse  <文本>                          解析文本中的网盘分享链接
   fnosctl rename <分类> <剧名目录> [中间层] <文件名>  演算规范落地路径
   fnosctl plan   <清单文件>                       批量规划（含消歧+碰撞检测），只读不落地
+  fnosctl transfer <文本> [--official] [--execute]
+                 --official = 走夸克官方 OAuth 转存（免 cookie，推荐）
+                              需 QUARK_SKILL_DIR + QUARK_AGENT_ENV
   fnosctl land   <挂载路径> [--source 子目录] [--cat 分类] [--alist] [--execute]
                  --alist = 走 Alist API 落地（光鸭必须用；只读挂载的网盘走这条）
                            需 ALIST_URL + (ALIST_TOKEN 或 ALIST_USER/ALIST_PASS)
@@ -324,6 +327,7 @@ func cmdTransfer(args []string) error {
 	}
 
 	execute := false
+	useOfficial := false
 	var textParts []string
 	for _, a := range args {
 		if a == "--execute" {
@@ -332,6 +336,10 @@ func cmdTransfer(args []string) error {
 		}
 		if a == "--allow-no-tmdb" {
 			allowNoTMDB = true
+			continue
+		}
+		if a == "--official" {
+			useOfficial = true
 			continue
 		}
 		textParts = append(textParts, a)
@@ -344,14 +352,26 @@ func cmdTransfer(args []string) error {
 	}
 
 	cfg := transferConfigFromEnv()
-	if execute {
-		if err := cfg.RequireCredentials(); err != nil {
+	var tr transfer.Transferor
+	if useOfficial {
+		// 官方 OAuth 通道：免 cookie，因此不校验 Web 凭据
+		q, err := officialQuarkFromEnv()
+		if err != nil {
 			return err
 		}
-	}
-	tr, err := transfer.New(cfg)
-	if err != nil {
-		return err
+		tr = q
+		fmt.Println("转存通道: 夸克官方 OAuth（免 cookie）")
+	} else {
+		if execute {
+			if err := cfg.RequireCredentials(); err != nil {
+				return err
+			}
+		}
+		t, err := transfer.New(cfg)
+		if err != nil {
+			return err
+		}
+		tr = t
 	}
 
 	if !execute {
@@ -372,8 +392,12 @@ func cmdTransfer(args []string) error {
 			continue
 		}
 		okCount++
-		fmt.Printf("  ✓ %s | 顶层 %d 项 | 递归共 %d 个文件\n",
-			res.Provider, len(res.Names), res.FileCount())
+		if res.Note != "" {
+			fmt.Printf("  ✓ %s | %s\n", res.Provider, res.Note)
+		} else {
+			fmt.Printf("  ✓ %s | 顶层 %d 项 | 递归共 %d 个文件\n",
+				res.Provider, len(res.Names), res.FileCount())
+		}
 		for j, n := range res.Names {
 			if j >= 5 {
 				fmt.Printf("    ... 共 %d 项\n", len(res.Names))
@@ -606,6 +630,25 @@ func applyNameMap(info *renamer.MediaInfo) {
 }
 
 var warnedTMDB = map[string]bool{}
+
+// officialQuarkFromEnv 构造夸克官方 OAuth 转存器（免 cookie）。
+//
+// 官方通道用 accessToken/refreshToken，会自动续期，比 Web cookie 稳定。
+// 代价是依赖 quarkclouddrive skill 的 CLI（Node 打包产物，源码禁读，
+// 官方接口地址不可知，只能调它）。
+func officialQuarkFromEnv() (*transfer.QuarkOfficialTransferor, error) {
+	dir := os.Getenv("QUARK_SKILL_DIR")
+	if dir == "" {
+		return nil, fmt.Errorf("使用 --official 需设置 QUARK_SKILL_DIR（quarkclouddrive skill 根目录）")
+	}
+	q := &transfer.QuarkOfficialTransferor{
+		SkillDir:  dir,
+		NodeBin:   os.Getenv("NODE_BIN"),
+		SessionID: os.Getenv("QUARK_SESSION_ID"),
+		AgentEnv:  os.Getenv("QUARK_AGENT_ENV"),
+	}
+	return q, q.Validate()
+}
 
 // alistBackendFromEnv 从环境变量构造 Alist 落地后端。
 //
