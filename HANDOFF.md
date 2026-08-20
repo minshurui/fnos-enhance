@@ -32,9 +32,13 @@ TG链接 → 识别 → 转存 → 改名 → 飞牛能刮。Go，零外部依�
 ## 🔧 待做（按优先级）
 ```
 🔧 M5 DoD 未达成：ingest 全链路从没一次跑通过（各段单独都验过了）
+    → 2026-08-20 已接线：ingest 支持 --official（夸克官方 OAuth），
+      saveas 落点固定 QUARK_TO_PDIR_PATH 默认「影视」（挂载根内，管道才能等挂载可见）
+    → NAS 环境已就绪：二进制已更新、quark skill 已部署到 ~/quarkclouddrive（含绑定账号）
+    → 管道 dry-run 全绿（957 文件可规划）；剩：拿真实可刮削链接 execute 一次，验证飞牛出海报
 🔧 从没执行过真实改名，全是 dry-run —— 云端改名不可逆，必须你本人点 --execute
 🔧 bot 接 fnosctl：只换掉 autoRename()，其余(搜索/回调/Emby/多盘)不动
-🔧 夸克落点没定：现在进「来自：分享」，要不要 --to-pdir-path 固定
+🔧 夸克落点：已定默认「影视」（QUARK_TO_PDIR_PATH 可覆盖）；是否分层待整理目录待定
 🔧 sub 定时跑：加 systemd timer 或 cron（--loop 已实现但没部署）
 ```
 
