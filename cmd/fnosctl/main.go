@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,12 +22,14 @@ const usage = `fnosctl — 飞牛增强层 CLI
   fnosctl parse  <文本>                          解析文本中的网盘分享链接
   fnosctl rename <分类> <剧名目录> [中间层] <文件名>  演算规范落地路径
   fnosctl plan   <清单文件>                       批量规划（含消歧+碰撞检测），只读不落地
+  fnosctl sub    add|list|check|off              订阅追更（人家更新→自动转存）
   fnosctl transfer <文本> [--official] [--execute]
                  --official = 走夸克官方 OAuth 转存（免 cookie，推荐）
                               需 QUARK_SKILL_DIR + QUARK_AGENT_ENV
   fnosctl land   <挂载路径> [--source 子目录] [--cat 分类] [--alist] [--execute]
-                 --alist = 走 Alist API 落地（光鸭必须用；只读挂载的网盘走这条）
-                           需 ALIST_URL + (ALIST_TOKEN 或 ALIST_USER/ALIST_PASS)
+                 --guangya = 光鸭原生 API 落地（不需要 Alist、不需要挂载，推荐）
+                             凭据 ~/.config/fnos-enhance/guangya.json
+                 --alist   = 走 Alist API 落地（需 ALIST_URL + 凭据）
                                                   扫描转存目录→规划→落地改名（默认 dry-run）
   fnosctl transfer <链接或包含链接的文本> [--execute]
                                                   转存网盘分享到自己网盘（默认 dry-run 只列举）
@@ -65,6 +68,8 @@ func main() {
 		err = cmdTransfer(os.Args[2:])
 	case "ingest":
 		err = cmdIngest(os.Args[2:])
+	case "sub":
+		err = cmdSub(os.Args[2:])
 	default:
 		fmt.Print(usage)
 		os.Exit(1)
@@ -237,6 +242,7 @@ func cmdLand(args []string) error {
 	categoryHint := ""
 	execute := false
 	useAlist := false
+	useGuangYa := false
 
 	for _, a := range args[1:] {
 		switch {
@@ -246,6 +252,8 @@ func cmdLand(args []string) error {
 			allowNoTMDB = true
 		case a == "--alist":
 			useAlist = true
+		case a == "--guangya":
+			useGuangYa = true
 		case strings.HasPrefix(a, "--source="):
 			sourceDir = strings.TrimPrefix(a, "--source=")
 		case strings.HasPrefix(a, "--cat="):
@@ -265,13 +273,24 @@ func cmdLand(args []string) error {
 		TMDBClient:  getTMDB(),
 		AllowNoTMDB: allowNoTMDB,
 	}
+	if useAlist && useGuangYa {
+		return fmt.Errorf("--alist 与 --guangya 只能选一个")
+	}
 	if useAlist {
 		be, err := alistBackendFromEnv()
 		if err != nil {
 			return err
 		}
 		cfg.Backend = be
-		fmt.Println("落地后端: Alist API（光鸭等只读挂载的网盘走这条）")
+		fmt.Println("落地后端: Alist API")
+	}
+	if useGuangYa {
+		be, err := guangyaBackendFromFile()
+		if err != nil {
+			return err
+		}
+		cfg.Backend = be
+		fmt.Println("落地后端: 光鸭原生 API（不需要 Alist、不需要挂载）")
 	}
 	l := lander.New(cfg)
 
@@ -648,6 +667,48 @@ func officialQuarkFromEnv() (*transfer.QuarkOfficialTransferor, error) {
 		AgentEnv:  os.Getenv("QUARK_AGENT_ENV"),
 	}
 	return q, q.Validate()
+}
+
+// guangyaBackendFromFile 从凭据文件构造光鸭原生后端。
+//
+// 协议移植自 AlistGo/alist 的 guangyapan 驱动，因此不再需要跑 Alist。
+// 凭据文件是 JSON：{"access_token":"…","refresh_token":"…","client_id":"…"}
+// 默认位置 ~/.config/fnos-enhance/guangya.json（应 chmod 600）。
+//
+// 令牌会轮换，所以刷新后必须写回文件，否则下次运行还用旧的。
+func guangyaBackendFromFile() (*lander.GuangYaBackend, error) {
+	p := os.Getenv("GUANGYA_CRED_FILE")
+	if p == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		p = filepath.Join(home, ".config", "fnos-enhance", "guangya.json")
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("读光鸭凭据失败 %s: %w", p, err)
+	}
+	var c struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ClientID     string `json:"client_id"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("解析光鸭凭据失败: %w", err)
+	}
+	if c.AccessToken == "" || c.ClientID == "" {
+		return nil, fmt.Errorf("光鸭凭据缺 access_token 或 client_id: %s", p)
+	}
+	be := lander.NewGuangYaBackend(c.AccessToken, c.RefreshToken, c.ClientID)
+	be.TokenSink = func(access, refresh string) {
+		c.AccessToken, c.RefreshToken = access, refresh
+		if b, err := json.MarshalIndent(c, "", "  "); err == nil {
+			// 令牌轮换后写回，权限保持 600
+			_ = os.WriteFile(p, b, 0o600)
+		}
+	}
+	return be, nil
 }
 
 // alistBackendFromEnv 从环境变量构造 Alist 落地后端。
