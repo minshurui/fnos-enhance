@@ -21,7 +21,9 @@ const usage = `fnosctl — 飞牛增强层 CLI
   fnosctl parse  <文本>                          解析文本中的网盘分享链接
   fnosctl rename <分类> <剧名目录> [中间层] <文件名>  演算规范落地路径
   fnosctl plan   <清单文件>                       批量规划（含消歧+碰撞检测），只读不落地
-  fnosctl land   <挂载路径> [--source 子目录] [--cat 分类] [--execute]
+  fnosctl land   <挂载路径> [--source 子目录] [--cat 分类] [--alist] [--execute]
+                 --alist = 走 Alist API 落地（光鸭必须用；只读挂载的网盘走这条）
+                           需 ALIST_URL + (ALIST_TOKEN 或 ALIST_USER/ALIST_PASS)
                                                   扫描转存目录→规划→落地改名（默认 dry-run）
   fnosctl transfer <链接或包含链接的文本> [--execute]
                                                   转存网盘分享到自己网盘（默认 dry-run 只列举）
@@ -224,13 +226,14 @@ func cmdPlan(args []string) error {
 
 func cmdLand(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("用法: fnosctl land <挂载根> [--source 子目录] [--cat 分类] [--execute]\n  挂载根 = 影视目录（如 /vol02/1000-1-a92fbdbc/影视）\n  --source = 转存文件所在子目录（如 0_待整理）\n  默认 dry-run，加 --execute 才真正改名")
+		return fmt.Errorf("用法: fnosctl land <挂载根> [--source 子目录] [--cat 分类] [--alist] [--allow-no-tmdb] [--execute]\n  挂载根 = 影视目录（如 /vol02/1000-1-a92fbdbc/影视；--alist 时为 Alist 虚拟路径如 /光鸭/影视）\n  --source = 转存文件所在子目录（如 0_待整理）\n  --alist  = 走 Alist API 落地（光鸭只读挂载必须用）\n  默认 dry-run，加 --execute 才真正改名")
 	}
 
 	mountRoot := args[0]
 	sourceDir := ""
 	categoryHint := ""
 	execute := false
+	useAlist := false
 
 	for _, a := range args[1:] {
 		switch {
@@ -238,6 +241,8 @@ func cmdLand(args []string) error {
 			execute = true
 		case a == "--allow-no-tmdb":
 			allowNoTMDB = true
+		case a == "--alist":
+			useAlist = true
 		case strings.HasPrefix(a, "--source="):
 			sourceDir = strings.TrimPrefix(a, "--source=")
 		case strings.HasPrefix(a, "--cat="):
@@ -256,6 +261,14 @@ func cmdLand(args []string) error {
 		NameMap:     getNameMap(),
 		TMDBClient:  getTMDB(),
 		AllowNoTMDB: allowNoTMDB,
+	}
+	if useAlist {
+		be, err := alistBackendFromEnv()
+		if err != nil {
+			return err
+		}
+		cfg.Backend = be
+		fmt.Println("落地后端: Alist API（光鸭等只读挂载的网盘走这条）")
 	}
 	l := lander.New(cfg)
 
@@ -593,6 +606,24 @@ func applyNameMap(info *renamer.MediaInfo) {
 }
 
 var warnedTMDB = map[string]bool{}
+
+// alistBackendFromEnv 从环境变量构造 Alist 落地后端。
+//
+// 光鸭必须走这条：它的 CloudDrive2 CloudFS 挂载只读，mkdir/rename 全失败。
+// 只调 HTTP API，不挂 FUSE、不用缓存——改名不需要读文件内容。
+func alistBackendFromEnv() (*lander.AlistBackend, error) {
+	base := os.Getenv("ALIST_URL")
+	if base == "" {
+		return nil, fmt.Errorf("使用 --alist 需设置 ALIST_URL（如 http://127.0.0.1:5245）")
+	}
+	tok := os.Getenv("ALIST_TOKEN")
+	user := orDefault(os.Getenv("ALIST_USER"), "admin")
+	pass := os.Getenv("ALIST_PASS")
+	if tok == "" && pass == "" {
+		return nil, fmt.Errorf("使用 --alist 需设置 ALIST_TOKEN，或 ALIST_USER + ALIST_PASS")
+	}
+	return lander.NewAlistBackend(base, tok, user, pass), nil
+}
 
 // allowNoTMDB 由 --allow-no-tmdb 置位：允许 TMDB 未识别的条目照样落地
 var allowNoTMDB bool

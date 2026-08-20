@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
-	"sync"
 
 	"fnos-enhance/internal/linker"
 	"fnos-enhance/internal/renamer"
@@ -53,6 +52,10 @@ type Config struct {
 
 	// AllowNoTMDB 为 true 时，TMDB 识别失败仍然落地（默认 false = 跳过）
 	AllowNoTMDB bool
+
+	// Backend 落地后端；为 nil 时默认 MountBackend（本地/rclone 挂载）。
+	// 光鸭需传 AlistBackend，因为它的 CloudFS 挂载只读。
+	Backend Backend
 }
 
 // Lander 落地器
@@ -64,8 +67,14 @@ func New(cfg Config) *Lander {
 	if cfg.MountPaths == nil {
 		cfg.MountPaths = make(map[linker.LinkType]string)
 	}
+	if cfg.Backend == nil {
+		cfg.Backend = MountBackend{}
+	}
 	return &Lander{cfg: cfg}
 }
+
+// Backend 返回当前落地后端
+func (l *Lander) Backend() Backend { return l.cfg.Backend }
 
 // PlanFromDir 扫描源目录，生成落地计划（只读，不执行）
 // mountRoot: rclone 挂载的影视目录根路径（目标路径以此为基准）
@@ -74,105 +83,19 @@ func (l *Lander) PlanFromDir(ctx context.Context, mountRoot, categoryHint string
 	// 目标路径始终相对于 mountRoot（影视目录根），避免分类重复
 	srcRoot := mountRoot
 	if l.cfg.SourceDir != "" {
-		srcRoot = filepath.Join(mountRoot, l.cfg.SourceDir)
+		srcRoot = joinPath(mountRoot, l.cfg.SourceDir)
 	}
 
-	var plans []*Plan
+	var pendings []*Plan
 	var allInfos []*renamer.MediaInfo // 用于批量消歧
 
-	type pending struct {
-		plan *Plan
-	}
-	var pendings []pending
-
-	err := filepath.Walk(srcRoot, func(fullPath string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fi.IsDir() {
+	err := l.cfg.Backend.Walk(ctx, srcRoot, func(rel string) error {
+		plan := l.buildPlan(ctx, srcRoot, mountRoot, rel, categoryHint)
+		if plan == nil {
 			return nil
 		}
-
-		// 跳过隐藏文件
-		if strings.HasPrefix(filepath.Base(fullPath), ".") {
-			return nil
-		}
-
-		// 从完整路径提取分类/剧名目录/中间层/文件名
-		rel, err := filepath.Rel(srcRoot, fullPath)
-		if err != nil {
-			return nil
-		}
-		parts := strings.Split(rel, string(filepath.Separator))
-		if len(parts) < 1 {
-			return nil
-		}
-
-		var cat renamer.Category
-		var dir, sub, file string
-
-		// 如果路径以分类开头（动漫/电影/...），剥掉分类段
-		if len(parts) > 1 && renamer.Category(parts[0]) != "" {
-			cat = renamer.Category(parts[0])
-			parts = parts[1:]
-		} else if categoryHint != "" {
-			cat = renamer.Category(categoryHint)
-		} else {
-			cat = renamer.CatAnime // 默认动漫（语料 95% 是动漫）
-		}
-
-		switch {
-		case len(parts) >= 3:
-			// 剧名目录/中间层/文件名
-			dir, sub, file = parts[0], parts[1], parts[2]
-		case len(parts) >= 2:
-			// 剧名目录/文件名（无中间层）
-			dir, sub, file = parts[0], "", parts[1]
-		default:
-			// 根目录散文件：用扫描根的目录名作为剧名目录
-			dir = filepath.Base(srcRoot)
-			if dir == "." || dir == "/" {
-				return nil
-			}
-			sub = ""
-		}
-
-		file = filepath.Base(fullPath)
-		info := renamer.ParsePackage(cat, dir, sub, file)
-
-		// 应用乱码名映射
-		if l.cfg.NameMap != nil {
-			l.cfg.NameMap.Apply(info)
-		}
-
-		// TMDB 补全
-		// 用户决策：认不出就跳过，留给人工。不能无 TMDB 也照落地——
-		// 否则飞牛刮不出海报，而云端改名不可回滚，还得人工改回来。
-		if l.cfg.TMDBClient != nil {
-			if err := l.cfg.TMDBClient.Enrich(ctx, info); err != nil {
-				fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
-			}
-			if info.TMDBID == 0 && !l.cfg.AllowNoTMDB {
-				info.NeedsReview = true
-				info.ReviewReason = "TMDB 未识别，已跳过（确认后可用 NAME_MAP 映射或 --allow-no-tmdb 强制入库）"
-			}
-		}
-
-		targetPath := info.BuildPath()
-		if targetPath == "" {
-			return nil
-		}
-
-		// 目标路径相对于挂载根
-		fullTarget := filepath.Join(mountRoot, targetPath)
-		// 源路径就是当前 fullPath
-		plan := &Plan{
-			SourcePath: fullPath,
-			TargetPath: fullTarget,
-			Info:       info,
-		}
-		pendings = append(pendings, pending{plan})
-		allInfos = append(allInfos, info)
+		pendings = append(pendings, plan)
+		allInfos = append(allInfos, plan.Info)
 		return nil
 	})
 	if err != nil {
@@ -183,15 +106,86 @@ func (l *Lander) PlanFromDir(ctx context.Context, mountRoot, categoryHint string
 	renamer.Disambiguate(allInfos)
 
 	// 消歧可能改变了 Edition 字段，重建目标路径
+	var plans []*Plan
 	for _, p := range pendings {
-		newTarget := p.plan.Info.BuildPath()
-		if newTarget != "" {
-			p.plan.TargetPath = filepath.Join(mountRoot, newTarget)
+		if newTarget := p.Info.BuildPath(); newTarget != "" {
+			p.TargetPath = joinPath(mountRoot, newTarget)
 		}
-		plans = append(plans, p.plan)
+		plans = append(plans, p)
+	}
+	return plans, nil
+}
+
+// buildPlan 把单个相对路径解析成落地计划；无法落地时返回 nil。
+//
+// rel 统一用 "/" 分隔（由 Backend.Walk 保证），因此这里不能用
+// filepath.Separator —— 否则 Alist 后端在任何平台都会解析失败。
+func (l *Lander) buildPlan(ctx context.Context, srcRoot, mountRoot, rel, categoryHint string) *Plan {
+	if rel == "" {
+		return nil
+	}
+	base := path.Base(rel)
+	if strings.HasPrefix(base, ".") {
+		return nil // 隐藏文件
 	}
 
-	return plans, nil
+	parts := strings.Split(rel, "/")
+	var cat renamer.Category
+	var dir, sub, file string
+
+	// 如果路径以分类开头（动漫/电影/...），剥掉分类段
+	if len(parts) > 1 && isCategoryDir(parts[0]) {
+		cat = renamer.Category(parts[0])
+		parts = parts[1:]
+	} else if categoryHint != "" {
+		cat = renamer.Category(categoryHint)
+	} else {
+		cat = renamer.CatAnime // 默认动漫（语料 95% 是动漫）
+	}
+
+	switch {
+	case len(parts) >= 3:
+		dir, sub, file = parts[0], parts[1], parts[2]
+	case len(parts) == 2:
+		dir, sub, file = parts[0], "", parts[1]
+	default:
+		// 扫描根下的散文件：用扫描根的目录名当剧名目录
+		dir = path.Base(srcRoot)
+		if dir == "." || dir == "/" || dir == "" {
+			return nil
+		}
+		sub = ""
+	}
+	file = base
+
+	info := renamer.ParsePackage(cat, dir, sub, file)
+
+	if l.cfg.NameMap != nil {
+		l.cfg.NameMap.Apply(info)
+	}
+
+	// TMDB 补全
+	// 用户决策：认不出就跳过，留给人工。不能无 TMDB 也照落地——
+	// 否则飞牛刮不出海报，而云端改名不可回滚，还得人工改回来。
+	if l.cfg.TMDBClient != nil {
+		if err := l.cfg.TMDBClient.Enrich(ctx, info); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: TMDB 补全失败 [%s] (%v)\n", info.Title, err)
+		}
+		if info.TMDBID == 0 && !l.cfg.AllowNoTMDB {
+			info.NeedsReview = true
+			info.ReviewReason = "TMDB 未识别，已跳过（确认后可用 NAME_MAP 映射或 --allow-no-tmdb 强制入库）"
+		}
+	}
+
+	targetPath := info.BuildPath()
+	if targetPath == "" {
+		return nil
+	}
+	return &Plan{
+		SourcePath: joinPath(srcRoot, rel),
+		TargetPath: joinPath(mountRoot, targetPath),
+		Info:       info,
+	}
 }
 
 // Execute 执行落地计划
@@ -235,8 +229,8 @@ func (l *Lander) Execute(ctx context.Context, plans []*Plan) (*Result, error) {
 		}
 
 		// 创建目标目录
-		targetDir := filepath.Dir(p.TargetPath)
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
+		targetDir := path.Dir(p.TargetPath)
+		if err := l.cfg.Backend.MkdirAll(ctx, targetDir); err != nil {
 			result.Failed = append(result.Failed, FailedFile{
 				Path:  p.SourcePath,
 				Error: fmt.Sprintf("创建目录失败 %s: %v", targetDir, err),
@@ -251,13 +245,13 @@ func (l *Lander) Execute(ctx context.Context, plans []*Plan) (*Result, error) {
 		}
 
 		// 检查目标是否已存在（幂等性）
-		if _, err := os.Stat(p.TargetPath); err == nil {
+		if ok, err := l.cfg.Backend.Exists(ctx, p.TargetPath); err == nil && ok {
 			result.Skipped = append(result.Skipped, p.SourcePath+" (目标已存在)")
 			continue
 		}
 
 		// 执行 rename/move
-		if err := os.Rename(p.SourcePath, p.TargetPath); err != nil {
+		if err := l.cfg.Backend.Rename(ctx, p.SourcePath, p.TargetPath); err != nil {
 			result.Failed = append(result.Failed, FailedFile{
 				Path:  p.SourcePath,
 				Error: fmt.Sprintf("改名失败: %v", err),
@@ -307,6 +301,3 @@ func DefaultMountPaths() map[linker.LinkType]string {
 func (l *Lander) MountPathForLinkType(lt linker.LinkType) string {
 	return l.cfg.MountPaths[lt]
 }
-
-// 预留：后续实现 CD2 gRPC 客户端用于光鸭
-var _ = sync.Mutex{}
