@@ -450,16 +450,21 @@ func cmdIngest(args []string) error {
   --source   转存落点（相对 --mount），缺省为挂载根
   --execute  真正执行（默认 dry-run，不转存不改名）
   --wait     等挂载刷新的上限，如 5m（默认 5m）
+  --official 走夸克官方 OAuth 转存（免 cookie；需 QUARK_SKILL_DIR + QUARK_AGENT_ENV）
+              落点 QUARK_TO_PDIR_PATH，默认「影视」（挂载根内，管道才能等挂载）
 
 ⚠ 光鸭网盘不能作为落地目标：CloudFS 挂载只读，无法 rename（见 docs/ADR-001）
 `
 	execute := false
+	useOfficial := false
 	var mount, source, wait string
 	var textParts []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--execute":
 			execute = true
+		case "--official":
+			useOfficial = true
 		case "--allow-no-tmdb":
 			allowNoTMDB = true
 		case "--mount", "--source", "--wait":
@@ -503,14 +508,30 @@ func cmdIngest(args []string) error {
 	}
 
 	tcfg := transferConfigFromEnv()
-	if execute {
-		if err := tcfg.RequireCredentials(); err != nil {
+	var tr transfer.Transferor
+	if useOfficial {
+		// 夸克官方 OAuth 通道：免 cookie，转存落点固定进挂载根内，管道才能等挂载可见
+		q, err := officialQuarkFromEnv()
+		if err != nil {
 			return err
 		}
-	}
-	tr, err := transfer.New(tcfg)
-	if err != nil {
-		return err
+		q.ToPdirPath = os.Getenv("QUARK_TO_PDIR_PATH")
+		if q.ToPdirPath == "" {
+			q.ToPdirPath = "影视" // 落点决策：固定进影视目录根（可 QUARK_TO_PDIR_PATH 覆盖）
+		}
+		tr = q
+		fmt.Println("转存通道: 夸克官方 OAuth（免 cookie）| 落点: " + q.ToPdirPath)
+	} else {
+		if execute {
+			if err := tcfg.RequireCredentials(); err != nil {
+				return err
+			}
+		}
+		t, err := transfer.New(tcfg)
+		if err != nil {
+			return err
+		}
+		tr = t
 	}
 
 	l := lander.New(lander.Config{

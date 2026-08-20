@@ -43,6 +43,10 @@ type QuarkOfficialTransferor struct {
 	// AgentEnv 需要注入的宿主标识环境变量，形如 "QODER_IDE=1"。
 	// 留空则不注入，CLI 可能拒绝执行并返回 code=-104。
 	AgentEnv string
+	// ToPdirPath 转存目标目录（相对网盘根），传给官方 CLI 的 --to-pdir-path。
+	// 空 = 不传，由 CLI 落默认位置（「来自：分享」）。
+	// ingest 全链路要求落点在挂载根之内，否则管道等不到新条目。
+	ToPdirPath string
 	// Timeout 单次调用超时
 	Timeout time.Duration
 }
@@ -171,6 +175,9 @@ func (q *QuarkOfficialTransferor) Transfer(ctx context.Context, link linker.Shar
 	}
 
 	args := []string{"saveas", "--url", url}
+	if q.ToPdirPath != "" {
+		args = append(args, "--to-pdir-path", q.ToPdirPath)
+	}
 	if link.Pwd != "" {
 		args = append(args, "--passcode", link.Pwd)
 	}
