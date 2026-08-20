@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -165,6 +166,37 @@ func TestPipeline_DryRunTouchesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(orig, "S01E01.mp4")); err != nil {
 		t.Error("dry-run 动了真实文件")
+	}
+}
+
+func TestPipeline_DryRunHonorsCategoryHint(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "staging", "雄狮少年2")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "4K.高码.mp4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := lander.New(lander.Config{MountRoot: root, SourceDir: "staging", DryRun: true})
+	p := &Pipeline{
+		Transferor:   &fakeTransferor{provider: "夸克"},
+		Lander:       l,
+		MountRoot:    root,
+		SourceDir:    "staging",
+		CategoryHint: "电影",
+	}
+	res := p.Run(context.Background(), []linker.ShareLink{{Type: linker.LinkQuark, ID: "a"}}, true)
+	if res[0].Err != nil {
+		t.Fatalf("dry-run 失败: %v", res[0].Err)
+	}
+	if res[0].Land == nil || len(res[0].Land.Plans) != 1 {
+		t.Fatalf("期望 1 条规划，得到 %+v", res[0].Land)
+	}
+	wantPrefix := filepath.Join(root, "电影") + string(filepath.Separator)
+	if !strings.HasPrefix(res[0].Land.Plans[0].TargetPath, wantPrefix) {
+		t.Fatalf("--cat 电影未生效，目标路径: %s", res[0].Land.Plans[0].TargetPath)
 	}
 }
 

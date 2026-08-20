@@ -32,6 +32,9 @@ type Pipeline struct {
 	MountRoot string
 	// SourceDir 转存落点（相对 MountRoot），留空则为挂载根
 	SourceDir string
+	// CategoryHint 强制指定落地分类（电影/动漫/电视剧/音乐）。
+	// 分享目录通常没有分类层，留空会按 lander 默认值「动漫」处理。
+	CategoryHint string
 
 	// WaitTimeout 等待挂载出现新条目的上限，0 用默认 5 分钟
 	WaitTimeout time.Duration
@@ -130,7 +133,7 @@ func (p *Pipeline) runOne(ctx context.Context, l linker.ShareLink, dryRun bool) 
 	p.logf("  ✓ 挂载已可见 %d 项: %s\n", len(appeared), strings.Join(truncateList(appeared, 3), ", "))
 
 	// ---- 阶段 3+4: 规划 + 落地 ----
-	plans, err := p.Lander.PlanFromDir(ctx, p.MountRoot, "")
+	plans, err := p.Lander.PlanFromDir(ctx, p.MountRoot, p.CategoryHint)
 	if err != nil {
 		sr.Stage, sr.Err = "plan", err
 		return sr
@@ -155,7 +158,7 @@ func (p *Pipeline) runOne(ctx context.Context, l linker.ShareLink, dryRun bool) 
 
 // planOnly dry-run 分支：不等待，直接对现有目录规划
 func (p *Pipeline) planOnly(ctx context.Context, sr StageResult) StageResult {
-	plans, err := p.Lander.PlanFromDir(ctx, p.MountRoot, "")
+	plans, err := p.Lander.PlanFromDir(ctx, p.MountRoot, p.CategoryHint)
 	if err != nil {
 		sr.Stage, sr.Err = "plan", err
 		return sr

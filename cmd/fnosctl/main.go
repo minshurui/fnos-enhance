@@ -442,12 +442,13 @@ func cmdTransfer(args []string) error {
 // ------------------------------------------------------------
 
 func cmdIngest(args []string) error {
-	const help = `用法: fnosctl ingest <链接或文本> --mount <挂载根> [--source 子目录] [--execute]
+	const help = `用法: fnosctl ingest <链接或文本> --mount <挂载根> [--source 子目录] [--cat 分类] [--execute]
 
   --mount    必填。影视目录根，目标路径以此为基准
              夸克: /vol02/1000-1-a92fbdbc/影视
              百度: /vol02/1000-1-cb415a99/影视
   --source   转存落点（相对 --mount），缺省为挂载根
+  --cat      必填建议。分享内容分类：电影/动漫/电视剧/音乐
   --execute  真正执行（默认 dry-run，不转存不改名）
   --wait     等挂载刷新的上限，如 5m（默认 5m）
   --official 走夸克官方 OAuth 转存（免 cookie；需 QUARK_SKILL_DIR + QUARK_AGENT_ENV）
@@ -457,7 +458,7 @@ func cmdIngest(args []string) error {
 `
 	execute := false
 	useOfficial := false
-	var mount, source, wait string
+	var mount, source, categoryHint, wait string
 	var textParts []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -467,7 +468,7 @@ func cmdIngest(args []string) error {
 			useOfficial = true
 		case "--allow-no-tmdb":
 			allowNoTMDB = true
-		case "--mount", "--source", "--wait":
+		case "--mount", "--source", "--cat", "--wait":
 			if i+1 >= len(args) {
 				return fmt.Errorf("%s 缺少参数\n\n%s", args[i], help)
 			}
@@ -476,6 +477,8 @@ func cmdIngest(args []string) error {
 				mount = args[i+1]
 			case "--source":
 				source = args[i+1]
+			case "--cat":
+				categoryHint = args[i+1]
 			case "--wait":
 				wait = args[i+1]
 			}
@@ -544,11 +547,12 @@ func cmdIngest(args []string) error {
 	})
 
 	p := &pipeline.Pipeline{
-		Transferor: tr,
-		Lander:     l,
-		MountRoot:  mount,
-		SourceDir:  source,
-		Logf:       func(f string, a ...interface{}) { fmt.Printf(f, a...) },
+		Transferor:   tr,
+		Lander:       l,
+		MountRoot:    mount,
+		SourceDir:    source,
+		CategoryHint: categoryHint,
+		Logf:         func(f string, a ...interface{}) { fmt.Printf(f, a...) },
 	}
 	if wait != "" {
 		d, err := time.ParseDuration(wait)
